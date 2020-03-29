@@ -1,0 +1,1045 @@
+---
+title: "Rapido Assignment"
+author: "Sahil Maheshwari"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    df_print: paged
+    toc: yes
+    toc_depth: '4'
+    toc_float:
+      collapsed: yes
+      smooth_scroll: yes
+  html_notebook:
+    df_print: paged
+    code_folding: "hide"
+    theme: united
+    number_sections: no
+    toc: yes
+    toc_depth: 4
+    toc_float:
+      collapsed: yes
+      smooth_scroll: yes
+editor_options:
+  chunk_output_type: inline
+---
+
+```{r setup, include=FALSE}
+options("scipen"=100, "digits"=4, "knitr.table.format"="pandoc")
+```
+
+```{r global_options, include=FALSE}
+knitr::opts_chunk$set(echo=FALSE, warning=FALSE, message=TRUE, error=FALSE, cache=TRUE, cache.lazy = FALSE, tidy=TRUE, highlight=TRUE, collapse=TRUE, fig.fullwidth=TRUE, fig.align="center", fig.width=10)
+```
+
+# Introductory Note
+The pupose of this doc. is NOT to summarise and present what I have done. Instead, the purpose is to explain my thought process while trying to solve the problem. So, this is a **follow-along-my-thought-process** doc. It was not prepared in the end to summarise, but was being made in the process of solving the problem. So, it won't be that precise and clean, but it will give a complete picture of my thought process.
+
+For the same reason, the problem statement comes after some initial basic analysis, which was required to get the hang of the data, even before getting into defining the problem concretely.
+
+Also, please read the [future improvements](#future_improvements) section, because I have put a lot of thought there too. In fact it has few things which I tried, but could not complete because of lack of time, so I removed it from the process, and kept them in future improvements.
+
+# Read data
+```{r, include=FALSE}
+rides_data = read_csv('data/ct_rr.csv')
+```
+
+Let's have a glimpse at the data
+```{r}
+glimpse(rides_data)
+```
+
+Let's see how top few rows look like
+```{r}
+datatable(head(rides_data), rownames = FALSE, filter="none", options = list(scrollX=T, pageLength = 6, scrollCollapse=FALSE, paging=FALSE))
+```
+
+# Basic cleaning
+## Missingness
+```{r}
+datatable(count_nas(rides_data), rownames = TRUE, filter="none", options = list(scrollX=T, pageLength = ncol(rides_data), scrollCollapse=FALSE, paging=FALSE))
+```
+No missing values, that's great
+
+## Duplicates
+```{r}
+rides_data_dedup = distinct(rides_data)
+
+rows_removed = nrow(rides_data) - nrow(rides_data_dedup)
+
+message("No. of duplicates: ", rows_removed, ", i.e. ", round(rows_removed/nrow(rides_data)*100), "% of total")
+```
+Nothing can explain a customer making same trips, at same time. So, just keeping one of such entries.
+
+On similar lines, data should be one request per customer at one time. So, assuming cases of multiple requests by same customer at same time must be because of failed requests, just keeping last of those requests.
+
+The no. of failed requests can give a lot of insight on demand-supply gap, but that's out of scope for now, so ignoring that data.
+
+```{r}
+# rides_data_orot <- rides_data_dedup %>% 
+#   group_by(ts, number) %>% 
+#   arrange(ts) %>% 
+#   filter(row_number() == n()) %>% 
+#   ungroup()
+# orot -> one request @ one time
+load("data/rides_data_orot.RData")
+
+rows_removed = nrow(rides_data_dedup) - nrow(rides_data_orot)
+
+message("No. of rows removed beacuse of multiple requests by same customer at same time: ", rows_removed)
+```
+
+```{r, include=FALSE}
+# removing unnecessary data
+rm(rides_data, rides_data_dedup)
+# save(rides_data_orot, file="data/rides_data_orot.RData")
+```
+
+# Basic analysis  
+Following are the questions I need answered to understand the data, even before going into the problem statement:  
+
+- time range?
+- how many customers?
+- how many unique lat-lng?
+    - this would require some geo-spatial clustering?
+    - number by pick and drop, is there any pattern?
+- are there any frequent routes?
+
+And some others, which will come up during analysis. Let's answer them..
+
+## Date Range
+```{r}
+range(rides_data_orot$ts)
+```
+So, data is from Apr, 2018 to Apr, 2019, that's one year of data. 
+
+Let's just see how it looks like at date level
+```{r}
+rides_per_day <- rides_data_orot %>% 
+  mutate(date = lubridate::date(ts)) %>% 
+  mutate(day_of_week = wday(ts, label=TRUE, abbr=TRUE)) %>% 
+  group_by(date) %>% 
+  summarise(ride_count = n(),
+            customer_count = n_distinct(number)) %>% 
+  ungroup()
+```
+
+<plot id="plot_date_level"></plot>
+```{r plot_date_level, fig.cap=""}
+ggplotly(
+  ggplot(rides_per_day, aes(x = date, y = ride_count)) +
+  geom_line()
+)
+```
+(Note: Graph is interactive, you can play around!)
+
+Obvious things to notice:
+
+* There is ~10 times increase in over a year
+* there is clear cut weekly seasonality
+
+Let's check for daily seasoanlity. Let's limit the data to last few month to make the graph interpretable
+```{r}
+rides_by_time_recent <- rides_data_orot %>% 
+  filter(ts > ymd("2019-03-30")) %>% 
+  group_by(ts) %>% 
+  summarise(ride_count = n()) %>% 
+  ungroup() %>% 
+  mutate(day_of_week = wday(ts, label=TRUE, abbr=TRUE))
+```
+
+```{r}
+ggplotly(
+  ggplot(rides_by_time_recent, aes(x = ts, y = ride_count)) +
+  geom_line(aes(color = day_of_week))
+)
+```
+
+Daily peaks around 9 a.m. and 6 p.m. on weekdays, and around 1 p.m. on weekends
+
+## Customers
+No. of unique customers:
+```{r}
+cat(n_distinct(rides_data_orot$number))
+```
+That's a lot of customers!
+
+Let's see how no. of customers vary, day wise
+```{r}
+rides_per_day_long <- rides_per_day %>% 
+  mutate(customer_count_scaled = customer_count * 5) %>% 
+  pivot_longer(c("ride_count", "customer_count_scaled"), names_to = "metric", values_to = "value")
+```
+
+```{r}
+ggplotly(
+  ggplot(rides_per_day_long, aes(x = date, y = value, group = metric, color = metric)) +
+  geom_line()
+)
+```
+
+```{r}
+cor(rides_per_day$ride_count, rides_per_day$customer_count)
+```
+
+They are higly correlated, but customer count has a slightly more stable weekly pattern, which is expected.
+
+```{r, include=FALSE}
+# removing unnecessary data
+rm(rides_per_day, rides_by_time_recent, rides_per_day_long)
+```
+
+Let's see some other details, to get a better view at customer level.
+
+```{r}
+rides_by_customer <- rides_data_orot %>% 
+  mutate(date = lubridate::date(ts)) %>% 
+  group_by(number) %>% 
+  arrange(date) %>% 
+  summarise(start = dplyr::first(date),
+            end = dplyr::last(date),
+            age = time_length((end - start), unit="days") + 1,
+            days_count = n_distinct(date),
+            ride_count = n()) %>% 
+  ungroup() %>% 
+  mutate(active_days_proportion = round(days_count/age*100, 2))
+```
+
+Age distribution of customers, in days
+```{r}
+summary(rides_by_customer$age)
+```
+
+Distribution of no.of active days of customers (active means days on which customer did a ride)
+```{r}
+summary(rides_by_customer$days_count)
+```
+
+Distribution of prop. of active days
+```{r}
+summary(rides_by_customer$active_days_proportion)
+```
+
+So, most of the customers are not active daily!. I didn't expect this, I thought many of the customers would be using Rapido for their daily office commute, so must be having ~60%-70% active days. Let's see journey of few customers in recent months
+
+```{r}
+rides_by_customer_sample <- rides_by_customer %>% 
+  dplyr::filter((active_days_proportion < 2 | active_days_proportion > 25) &
+                  start > dmy("01-01-2019"))
+```
+
+Distribution of no. rides per customer, in days
+```{r}
+summary(rides_by_customer$ride_count)
+```
+
+```{r}
+# removing unnecessary data
+rm(rides_by_customer, rides_by_customer_sample)
+```
+
+## Lat-Long
+Let's see count of unique lat-longs as per pick or drop
+
+```{r}
+# rides_data_long <- rides_data_orot %>% 
+#   pivot_longer(pick_lat:drop_lng, names_to = c("pick_or_drop", "lat_or_long"), names_sep = "_", values_to = "value") %>% 
+#   pivot_wider(names_from = "lat_or_long", values_from = "value") %>% 
+#   unite("lat_lng", lat:lng, sep = "_", remove = FALSE)
+# 
+# by_pick_or_drop <- rides_data_long %>% 
+#   group_by(pick_or_drop) %>% 
+#   summarise(unique_locations = n_distinct(lat_lng))
+
+load("data/ride_data_long.RData")
+
+by_pick_or_drop
+```
+
+So, there are 39.84 lakhs pick up locations, but just 4.84 lakhs drop locations, which is 12% of the pick up locations. 
+
+Now, there can be two kind of rides - one-way and round trip. Round trip would result in almost same count of pick and drop lat-longs. Which means that there are a lot of one way trips, and the destination of those one way trips is concentrated to few regions. This is just an hypothesis but an important one, and we can explore it later.
+
+Though, I somehow know that data is for Bangalore, but let's still confirm that from the data
+```{r}
+lat <- sort(unique(rides_data_long$lat))
+lng <- sort(unique(rides_data_long$lng))
+```
+
+Here is the summary for our lat-longs (consider just unqiue values of lat-longs, not their count)
+```{r}
+quantile(lat, seq(0,1,.1))
+quantile(lng, seq(0,1,.1))
+```
+
+Searching on google, the area seems to be Bangalore. But let's also check if all lat-longs are from inside Bangalore?
+
+Lat-lon coordinates for bounding-box for Bangalore are:
+```{r}
+bangalore_geocode <- geocode(c("Bangalore"), output = "all")
+bangalore_geocode$results[[1]]$geometry$bounds
+```
+
+So, even though Bangalore seems to be the main region, there a lot of point seem outside Bnagalores's boundary. Let's handle this later.
+
+```{r}
+# removing unnecessary data
+# save(rides_data_long, by_pick_or_drop, file="data/ride_data_long.RData")
+rm(rides_data_long, by_pick_or_drop)
+```
+
+## Summary of basic analysis
+
+***
+- ~83 lakh rides
+- 1 year of data, from Apr, 2018 to Apr, 2019
+- ~94k customers
+- Rides has increased a lot over in this 1 year
+- Weekly and daily seasonality. Daily peaks around 9 a.m. and 6 p.m. on weekdays, and around 1 p.m. on weekends. There might be other seasonalities too, but not so obvious.
+- Pick locations: 39.84 lakhs, drop locations: 4.84 lakhs (just 12% of pick locations). Hypothesis: Many one way rides with destinations conecntrated to limited regions.
+
+# Problem Statement
+Given ask is to predict ride requests for the future. Its not specifies at what granularity. 
+
+> Let's call ride requests "demand"
+
+There are three dimensions, over which demand can be predicted:
+
+- Geography
+- Time
+- Customer
+
+Its important to assume for what purpose are we going to use these predictions, because based on that only we will be able to decide the granularity of our predictions among the three dimensions. 
+
+Possible use of demand predictions can be:
+
+1. To get supply (riders) targets for new month/quarter/.., based on expected demand growth
+2. Pro-active allocation of supply i.e. riders, based on demand
+3. Close demand supply gap by
+  - paying more commission to riders for routes and times, when and where demand > supply, compared to when and where demand < supply
+  - charging customers higher when and where demand > supply, compatred to when and where demand < supply
+4. To incetivize the customer to use Rapido more, given his predictions are low. But, there are better ways to solve this problem then going the customer-level-demand-prediction route, like identifying gradual decrease in demand and act on it, etc.
+
+Let's go by use case 2, i.e.
+
+> Pro-active allocation of supply i.e. riders each day, based on demand
+  
+**For this use case, we need to predict at pick region level (we need to decide region granularity). For time dimension, it makes sense to predict at some period_in_day level, so that there is time for pro-cative allocation.**
+
+# Initial Data prep.
+## Reduce granularity
+Current data is huge. First thing to do is to reduce the granularity, in a way that we don't loose any inp. info. required to predict at pick_region-period level. We will do the following
+
+- Geography: Round lat-long to 2 decimals, which is approx. 1 km
+- Time: Get it at hour level
+- Customer: Remove customer level granularity, group data at drop_region-hour level
+
+```{r}
+rides_roundCoord_dateHour <- rides_data_orot %>% 
+  mutate(pick_lat = round(pick_lat, 2),
+         pick_lng = round(pick_lng, 2)) %>% 
+  mutate(date = lubridate::date(ts),
+         hour_of_day = lubridate::hour(ts)) %>% 
+  group_by(pick_lat, pick_lng, date, hour_of_day) %>% 
+  summarise(ride_count = n()) %>% 
+  ungroup() %>% 
+  mutate(day_of_week = wday(date, label=TRUE, abbr=TRUE),
+         day_of_week_bucket = ifelse(day_of_week %in% c("Mon", "Tue", "Wed", "Thu", "Fri"), "weekday", as.character(day_of_week))) %>% 
+  unite("lat_lng", pick_lat:pick_lng, sep = ", ", remove = FALSE)
+```
+
+
+```{r}
+datatable(head(rides_roundCoord_dateHour), rownames = FALSE, filter="top", options = list(scrollX=T, pageLength = 6, scrollCollapse=FALSE, paging=FALSE))
+```
+
+No. of rows reduced to ~13 lakhs, from ~83 lakhs
+
+No. of unique lat-longs are: `r n_distinct(rides_roundCoord_dateHour$lat_lng)`
+
+```{r, include=FALSE}
+rm(rides_data_orot)
+```
+
+## Outliers or Invalid data handling
+
+Here, outliers/invalid entries can be for:
+
+- lat-long entries - will handle it while group them
+- Date entries - this we have already checked, and removed duplicate entries (i.e. same customer, same time)
+- ride count values - this we have aggregated from individual rides, so until and unless individual ride data is wrong, this can't be wrong, and we can't check if individual ride data is wrong. Yes, we can handle extreme unusual values at region-date-hour level, but I will let the model handle it for now.
+
+
+<section id="region_grouping"></section>
+## Region Grouping
+Let's see distribution of no. of rides per region, aggregated for entire 1 year
+```{r}
+rides_by_latLong <- rides_roundCoord_dateHour %>% 
+  group_by(lat_lng) %>% 
+  summarise(ride_count_sum = sum(ride_count)) %>% 
+  arrange(desc(ride_count_sum)) %>% 
+  ungroup()
+```
+
+```{r}
+quantile(rides_by_latLong$ride_count_sum, seq(0, 1, .1))
+```
+
+So, a lot of regions have very few rides, even during the whole year. So, we should be either combining them, or ignoring them completely from our prediction, or they will create noise.
+
+I have downloaded Bangalore's Municipal data boundaries from [here](http://projects.datameet.org/Municipal_Spatial_Data/). 
+
+
+```{r, include=FALSE}
+# source("get_municipal_region.R")
+load("data/get_municipal_region.RData")
+```
+
+```{r}
+datatable(head(bbmp_muncipal_wards), rownames = FALSE, filter="none", options = list(scrollX=T, pageLength = 6, scrollCollapse=FALSE, paging=FALSE))
+```
+
+Will use this data to select lat-longs inside Bangalore's boundaries
+
+This is how the data looks now.
+```{r}
+datatable(head(rides_Bangalore_byHourRegion), rownames = FALSE, filter="none", options = list(scrollX=T, pageLength = 6, scrollCollapse=FALSE, paging=FALSE))
+```
+
+We have `r nrow(rides_Bangalore_byHourRegion)` lakh rows (not rides) at Date, hour, region level
+
+Only `r nrow(point_geo_within_coord)` unique lat-longs (out of `r nrow(rides_point_latLong)`), lies within bangalore's muncipal boundaries. Let's check how many rides are outside the cover cover.
+
+No. of rides outside boundaries of defined Municipal areas: `r nrow(rides_outside)`
+
+This is not an ignorable no. Reason can be inaccurate 'within-ness' calculation function, or maybe so many rides are outside the region. Currently, don't have time to inquire about this, so will ignore for now.
+
+In total, there are `r n_distinct(rides_Bangalore_byHourRegion$WARD_NAME)` unique regions. That's much more manageable than 4056 unique lat-longs before.
+
+Let's check out no. of rides in each municipal region
+
+```{r}
+datatable(rides_Bangalore_byRegion, rownames = FALSE, filter="top", options = list(scrollX=T, scrollY="500px", scrollCollapse=TRUE, paging=FALSE))
+```
+
+Top 70 regions (out of `r n_distinct(rides_Bangalore_byRegion$WARD_NAME)`) comprise ~80% of the demand.
+
+Let's see it on map.
+
+```{r}
+pal <- colorNumeric(
+  palette = "YlGnBu",
+  domain = bbmp_muncipal_wards_sel$ride_count
+)
+
+leaflet(data = bbmp_muncipal_wards_sel) %>% 
+  addTiles() %>% 
+  addPolygons(label = ~paste(WARD_NAME, ride_count, sep = ": "),
+              weight = 1, opacity = 1.0,
+              fill = TRUE, fillOpacity = 1,
+              fillColor = ~pal(ride_count),
+              highlightOptions = highlightOptions(color = "black", weight = 2, bringToFront = TRUE)) %>% 
+  addLegend("topright", pal = pal, values = ~ride_count,
+            title = "Ride Count",
+            opacity = 1)
+```
+
+There are regions of low ride counts, we can combine them if their boundaries are touching, into regions having enough ride count so that planning for them makes sense.
+
+```{r, include=FALSE}
+# removing unnecessary data
+rm(rides_roundCoord_dateHour, rides_by_latLong, bbmp_muncipal_wards, rides_point_latLong, point_geo_within_coord, rides_outside, rides_Bangalore, rides_Bangalore_byRegion)
+```
+
+```{r, include=FALSE}
+source("combine_regions.R")
+```
+
+```{r}
+pal <- colorNumeric(
+  palette = "YlGnBu",
+  domain = bbmp_wards_sel_clustered$ride_count
+)
+
+pal_border <- colorFactor(
+  palette = c("grey", "red"),
+  domain = bbmp_wards_sel_clustered$is_clustered
+)
+
+leaflet(data = bbmp_wards_sel_clustered) %>% 
+  addTiles() %>% 
+  addPolygons(label = ~paste(WARD_NAME, ride_count, sep = ": "),
+              weight = 1, opacity = 1.0, color = ~pal_border(is_clustered),
+              fill = TRUE, fillOpacity = 1,
+              fillColor = ~pal(ride_count),
+              highlightOptions = highlightOptions(color = "black", weight = 2, bringToFront = TRUE)) %>% 
+  addLegend("topright", pal = pal, values = ~ride_count,
+            title = "Ride Count",
+            opacity = 1)
+```
+
+So, a big chunk of left border regions have been clustered together. No. of regions now are `r n_distinct(bbmp_wards_sel_clustered$WARD_NAME)`
+
+Let's also see time growth graphs of these regions (at day level):
+
+```{r}
+ward_names_to_plot <- c("Bellanduru", "Shantala Nagar", "cluster_1", "Begur", "Aramane Nagara", "K R Puram", "Kaveripura")
+
+plot_list = list()
+for (i in 1:length(ward_names_to_plot)) {
+  region = ward_names_to_plot[i]
+  data_to_plot = rides_Bangalore_byDateRegion_new[rides_Bangalore_byDateRegion_new$WARD_NAME == region,]
+  population_of_region = bbmp_wards_sel_clustered[bbmp_wards_sel_clustered$WARD_NAME == region,][["POP_TOTAL"]]
+  
+  plot_list[[i]] = 
+  ggplot(data_to_plot, aes(x = date, y = ride_count)) +
+    geom_line() +
+    ggtitle(paste0("Region: ", region, ", Population: ", population_of_region)) +
+    theme(axis.text.x = element_text(angle=45))
+}
+```
+
+### Ride growth in time, by region  {.tabset}
+```{r, results='asis', echo = FALSE}
+for (i in c(1,3,7)) {
+  cat("#### ", ward_names_to_plot[i], "\n")
+  print(plot_list[[i]])
+  cat('\n\n')
+}
+```
+
+###
+As expected, there are more predictable patterns for regions with high no. of rides, compared to regions with low no.
+
+## Temporal Grouping
+For now, let's see hour level trends for few regions. No. of rides has increased 10 fold in the one year, so it does not make sense to see the hourly trends on entires data. **Let's start from mid-Feb, 2019** (because data from there seems to be on same level as the end of data, see [here](#plot_date_level))
+
+Let's first see Bangalore level trends
+```{r}
+rides_latest <- rides_Bangalore_byHourRegion_new %>% 
+  dplyr::filter(date >= dmy("15-02-2019")) %>% 
+  mutate(day_of_week = wday(date, label = TRUE, abbr = TRUE),
+         day_of_week_bucket = ifelse(day_of_week %in% c("Mon", "Tue", "Wed", "Thu", "Fri"), "weekday", as.character(day_of_week)))
+```
+
+```{r}
+rides_latest_byHour <- rides_latest %>% 
+  group_by(day_of_week_bucket, hour_of_day) %>% 
+  summarise(ride_count_median = median(ride_count)) %>% 
+  ungroup()
+```
+
+```{r}
+ggplot(rides_latest_byHour, aes(x = hour_of_day, y = ride_count_median)) + 
+  geom_bar(stat = "identity") +
+  facet_grid(day_of_week_bucket ~ ., scales = "free") + 
+  scale_x_continuous(breaks = 0:23) +
+  theme(axis.text.x = element_text(angle=45))
+``` 
+
+Now let's see trends for few selected regions, regions have been selected in a way to cover the geography and different rides numbers.
+
+```{r}
+rides_latest_collapsed_on_date <- rides_latest %>% 
+  group_by(day_of_week_bucket, hour_of_day, WARD_NAME) %>% 
+  summarise(ride_count_median = median(ride_count)) %>% 
+  ungroup()
+```
+
+
+```{r}
+ward_names_to_plot <- c("Bellanduru", "Shantala Nagar", "cluster_1", "Begur", "Aramane Nagara", "K R Puram", "Kaveripura")
+
+plot_list = list()
+for (i in 1:length(ward_names_to_plot)) {
+  region = ward_names_to_plot[i]
+  data_to_plot = rides_latest_collapsed_on_date[rides_latest_collapsed_on_date$WARD_NAME == region,]
+  ride_count_of_region = rides_Bangalore_byRegion_new[rides_Bangalore_byRegion_new$WARD_NAME == region,][["ride_count"]]
+  population_of_region = bbmp_wards_sel_clustered[bbmp_wards_sel_clustered$WARD_NAME == region,][["POP_TOTAL"]]
+  
+  plot_list[[i]] = 
+    ggplot(data_to_plot, aes(x = hour_of_day, y = ride_count_median)) + 
+      geom_bar(stat = "identity") +
+      facet_grid(day_of_week_bucket ~ ., scales = "free") + 
+      scale_x_continuous(breaks = 0:23) +
+      theme(axis.text.x = element_text(angle=45)) +
+      ggtitle(paste0("Region: ", region, ", Population: ", population_of_region, ", Total Rides: ", ride_count_of_region))
+}
+```
+
+### Ride growth in time, by region  {.tabset}
+```{r, results='asis', echo = FALSE}
+for (i in c(1,3,7)) {
+  cat("#### ", ward_names_to_plot[i], "\n")
+  print(plot_list[[i]])
+  cat('\n\n')
+}
+```
+
+###
+These are the patterns I notice
+- For high ride areas
+  - Weekdays: peaks at [9-11], [18-20]
+  - Saturdays: peaks at [12-14], [18-20],
+  - Sundays: peaks at [21-23]
+- For few areas peaks on [1-3] on Saturdays
+- No obvious pattern for low rides areas, apart from [8-10] peaks on weekdays
+
+Now, here we have two options:
+
+1. To predict at hourly level, with these peak period as manual features or not, and then aggregate at whatever level is required to pro-actively manage supply
+2. To predict at pre-defined hour-groups
+  - In this, if we go by groups of unequal durations, then time series models won't be possible
+ 
+For now, in absence of any input on level of prediction at time dimension, I will go with option 1. Maybe this is too granular a level, thus adding unnecessary noise, but let's just do it at this level for now.
+
+```{r, include=FALSE}
+# removing unnecessary data
+# save(rides_Bangalore_byHourRegion_new, bbmp_wards_sel_clustered, file = "data/combine_regions.RData")
+rm(ride_count_threshold, bbmp_muncipal_wards_sel_xy, bbmp_sel_ward_geo, bbmp_sel_ward_names, bbmp_sel_ward_names_comb, bbmp_sel_ward_names_comb_1, bbmp_sel_ward_names_comb_2, bbmp_sel_ward_1, bbmp_sel_ward_2, bbmp_wards_for_matching, edge_df, network, network_components, ward_clusters, bbmp_muncipal_wards_sel_withClusters, cluster_lon, cluster_lat, rides_Bangalore_byDateRegion_new)
+```
+
+
+# ML Strategy
+## Modeling
+Its a geo-temporal data, meaning we have geographic component, as well as time component to it. 
+
+We have already used the geographical context to group lat-longs into some-kind-of-homogenous regions. We have also decided to predict just at pick-region level, so we have ignored the drop-location and thus the route data, and thus the chance to use any graph-theory based algorithm.
+
+On time dimension, we have reduced the data to date-hour level. So, we are free to use any time series model.
+
+Overall its a prediction problem on a continuous data, so any non-time-series continous target prediction algorithms are also valid.
+
+So, we have both time-series and non-time-series option, and under each we can go by
+
+- separate model for each region
+  - can't do this for time-series
+  - no signal sharing between regions
+- region as a feature
+- hierarchical model
+  - with hierarchy in regions
+  - allows for signal sharing between regions
+
+  
+There are other things to decide between ts vs non-ts model, like ts models have more assumptions/constraints (like stationarity), or ts models are good at capturing seasonalities, etc. But, these are not valid points, for e.g. ets models does not require stationarity assumption, and Prophet from facebook is very good at capturing seasonalities even though its not a typical ts-model. So, usually we try both classes of models, and then drift towards one giving better results. 
+
+But, if we must choose between the two, then we can consider following points
+
+- Do we have a lot of non-ts features on which, we think, the target depends on . If yes, its better to go with non-ts models. The reason behing this is that having a lot of non-ts features means that the data is being generated from an unstable or immature generating process, i.e. there are a lot of exogenous variables influencing the target and thus we don't have a predictable pattern in time. With Rapido, I think that's the case, the demand is very unstable now because a lot of factors may be influencing it.
+
+- Data prep., transformations, splitting, validation, hyperparameter tuning, etc. - all are more complex for ts-models, and by complex I mean they may take more time, for e.g. cross validation is not starightforward because I can't randomly split data. So, if time is the constraint, then its better to go with a non-ts model.
+
+So, assuming a lot of exogenous variables and constraint of time, I expect a non-ts based approach to work better. But I will try both, specifically:
+
+- ARIMAX, with seasonality captured by fouries terms as external regressors (because SARIMA can only handle single seasonality, and here we have two - daily and weekly)
+- Bagging, Boosting based and their ensembles - using h2o's autoML
+
+
+## Evaluation or Validation
+### Train-Validation-Test
+Before going into the specific splits, we have to answer the following questions:
+
+- To go for entire 1 year of data, or just the data starting from Jan-1-2019? - The reason for going with less that is that the data before Jan-2019 is very unstable, and may add more noise to the model than providing signals. We can check the results for both approaches, but with our time constraints less go with the latter option.
+
+- To predict for all 165 regions or a subset of regions? - Predicting for all 165 regions may take a lot of time for a multi-model approach and may not be required because top-50 regions comprise ~80% of the demand. But, for our use case it makes sense to predict for as many regions as possible, so that supply can be shifted from low demand to high demand areas.
+
+**So, we will be predicting for all regions, taking data from Jan-1-2019**
+
+Now, even though we will be predicting using non-ts models, our validation would still have to follow time series rules, because our data is inherently time-series. Also, we should include all 7 days of week in our test set, to ensure that model is picking up day_of_week level trends.
+
+So, let's define train, validation (if required), and test periods as follows:
+
+- train: Jan-1-2019 to Mar-31-2019 (~13 weeks, i.e. 13*7*24 -> 2184 observations for each region on an average, assuming each region has an observation at each hour)
+- test: Apr-1-2019 to Apr-7-2019 (1 week)
+
+### Metric
+Here, we have to compare prediction for `r n_distinct(bbmp_wards_sel_clustered$WARD_NAME)` regions, at hourly level. So, we will have a distribution of metric to compare with, and we will do that only, instead of comparing just a single no. like mean/median across region. So, to compare any two predictions, we will see distribution of paired differences of the metric at region level
+
+These regions scale for no. of rides vary a lot, so MAE may vary a lot. So, it makes sense to use MAPE as it is unit independent. But MAPE has following issues
+
+- can't handle zeroes in actual values
+- can become meaningless for negative values
+- extremely small actual values can heavily influence it
+- assumes that the same absolute errors are less problematic for time series on higher levels than for time series on lower levels, which makes it unit independent, but this assumption may not always be true
+
+This is how we will handle it
+
+- make zeroes -> ones. We don't have negative values, so its cool.
+- take median, instead of mean to handle heavy influence of extremely small values. This does not solve the problem, it just attenuates it
+- Because MAPE may still have some problems, we will also use a METRIC called [SDMAE](https://www.statworx.com/at/blog/what-the-mape-is-falsely-blamed-for-its-true-weaknesses-and-better-alternatives/)
+
+
+### Baselining
+
+We will try following baseline models
+
+- Based on central measures: Mean, Median
+- Based on past values
+  - values of last day
+  - values of last week
+  - if day_of_week in ("Sat", "Sun", "Mon"), then past week values, else past day values
+  - all of these would be in rolling fashion on test set
+
+# Feature Engineering
+
+I can think of following types of features
+
+- Calendar based, like day of week, day of month, etc.
+- Geography based, like population, population-density, etc.
+- ts-based, like rolling mean, past values, etc.
+  - Instead of calcculating these, I will be using STR decomposition to directly get the trend and seasonality components
+- Misc. like rolling ride/population ratio
+
+
+
+
+# ML Implementation
+## Select duration
+As decided, train will be from Jan-1-2019 to Mar-31-2019 (~13 weeks), and test from Apr-1-2019 to Apr-7-2019 (1 week)
+```{r}
+rides_latest <- rides_Bangalore_byHourRegion_new %>% 
+  dplyr::filter(date >= dmy("01-01-2019"))
+```
+
+This is how distribution of no. of observations for each region looks
+```{r}
+observation_count <- rides_latest %>% 
+  group_by(WARD_NAME) %>% 
+  summarise(obs_count = n()) %>% 
+  arrange(desc(obs_count)) %>% 
+  ungroup()
+```
+
+```{r}
+quantile(observation_count$obs_count, seq(0,1,.1))
+```
+
+## Make data continuous and Split
+```{r, include=FALSE}
+load("data/rides_cont.RData")
+```
+
+This is how it looks for few regions
+```{r}
+ward_names_to_plot <- c("Bellanduru", "Shantala Nagar", "cluster_1", "Begur", "Aramane Nagara", "K R Puram", "Kaveripura")
+
+plot_list = list()
+for (i in 1:length(ward_names_to_plot)) {
+  region = ward_names_to_plot[i]
+  
+  data_to_plot = dplyr::filter(rides_cont_all, WARD_NAME == region) %>% 
+  mutate(date_time = ymd_hms(paste(date, " ", hour_of_day, ":00:00")))
+  
+  plot_list[[i]] = 
+    ggplot(data_to_plot, aes(x = date_time, y = ride_count)) + 
+      geom_line() +
+      ggtitle(paste0("Region: ", region))
+}
+```
+
+### Ride growth in time, by region  {.tabset}
+```{r, results='asis', echo = FALSE}
+for (i in c(1,3,7)) {
+  cat("#### ", ward_names_to_plot[i], "\n")
+  print(plot_list[[i]])
+  cat('\n\n')
+}
+```
+
+## Feature Engg.
+```{r, include=FALSE}
+load("data/feature_engg_output.RData")
+```
+
+This is how the data looks like after feature engineering:
+```{r}
+datatable(head(rides_for_model), rownames = FALSE, filter="top", options = list(scrollX=T, pageLength = 6, scrollCollapse=FALSE, paging=FALSE))
+```
+
+## Baselining
+```{r}
+load("models/baseline_all.RData")
+```
+
+To compare baseline models, we will just see MAE, beacuse that will what will go into the calculation of r-Squared. This is how the region-MAE distribution looks.
+
+```{r}
+source("evaluation.R")
+```
+
+```{r}
+test_eval_df_baseline <- get_eval_metric_by_region_for_baseline(test_pred_df_baseline, ride_count, ride_count_median, "medianMethod") %>% 
+  left_join(get_eval_metric_by_region_for_baseline(test_pred_df_baseline, ride_count, ride_count_mean, "meanMethod"), by = "WARD_NAME") %>% 
+  left_join(get_eval_metric_by_region_for_baseline(test_pred_df_baseline, ride_count, ride_count_day_lag, "dailyNiave"), by = "WARD_NAME") %>% 
+  left_join(get_eval_metric_by_region_for_baseline(test_pred_df_baseline, ride_count, ride_count_week_lag, "weeklyNaive"), by = "WARD_NAME") %>% 
+  left_join(get_eval_metric_by_region_for_baseline(test_pred_df_baseline, ride_count, ride_count_smart_lag , "smartNaive"), by = "WARD_NAME")
+```
+
+```{r}
+test_eval_baseline_MAE <- test_eval_df_baseline %>% 
+  pivot_longer(starts_with("MAE_"), names_prefix = "MAE_", names_to = "method", values_to = "MAE")
+```
+
+```{r}
+ggplotly(
+  ggplot(test_eval_baseline_MAE, aes(x = MAE, fill = method)) +
+    geom_density(alpha = .4)
+)
+```
+
+Not that clear from this, let's see the summary
+```{r}
+temp = as.data.frame(t(sapply(dplyr::select(test_eval_df_baseline, starts_with("MAE_")), summary)))
+
+datatable(temp, rownames = TRUE, filter="none", options = list(scrollX=T, pageLength = 5, scrollCollapse=FALSE, paging=FALSE))
+```
+
+"weeklyNaive" and "smartNaive" seems to be in competition. Let's go with "weeklyNaive", becasue its simpler.
+
+```{r}
+test_eval_baseline_final <- dplyr::select(test_eval_df_baseline, WARD_NAME, MAE_weeklyNaive)
+```
+
+
+## Modeling
+### h2o's autoML
+```{r}
+load("models/h2o_all.RData")
+automl_leader <- automl_models_h2o@leader
+```
+
+It selected 'xgboost' as a leader. The feature importance is as follows:
+```{r}
+h2o.varimp_plot(automl_leader)
+```
+
+Let's see the error distribution
+```{r}
+test_eval_df_h2o <- get_eval_metric_by_region_for_nonBaseline(test_pred_df_h2o, ride_count_actual, ride_count_pred, test_eval_baseline_final, MAE_weeklyNaive)
+```
+
+```{r}
+temp = as.data.frame(t(sapply(dplyr::select(test_eval_df_h2o, -WARD_NAME, -MAE_weeklyNaive), summary)))
+
+datatable(temp, rownames = TRUE, filter="none", options = list(scrollX=T, pageLength = 5, scrollCollapse=FALSE, paging=FALSE))
+```
+
+So, r-squared is negative atleast till 75th quantile, i.e. the model is worst off than the best baseline model for at least 75% of the regions
+
+### ARIMAX
+```{r}
+load("models/arima_all.RData")
+```
+
+Let's see the error distribution
+```{r}
+test_eval_df_arima <- get_eval_metric_by_region_for_nonBaseline(test_pred_df_arima, ride_count_actual, ride_count_pred, test_eval_baseline_final, MAE_weeklyNaive)
+```
+
+```{r}
+temp = as.data.frame(t(sapply(dplyr::select(test_eval_df_arima, -WARD_NAME, -MAE_weeklyNaive), summary)))
+
+datatable(temp, rownames = TRUE, filter="none", options = list(scrollX=T, pageLength = 5, scrollCollapse=FALSE, paging=FALSE))
+```
+
+This is slightly better than h2o's autoML, but this too is worse off than the best baseline model for atleast 50% of the regions.
+
+# Model Results Summary
+
+- First of all, to my surprise a time-series model is performing better than a non-tim-series model, even though the non-time-series model is better tuned (h2o's sophisticated n-fold cross validation). That's interesting, but I think the reason is feeding STR components as features to the non-time-series model, instead ogf manually curated time-series features.
+- But, even the time-series model is worst of than baseline model for atleast 50% of the regions
+
+Now, let's visualize the MAE comparison of three models
+```{r}
+test_eval_comb <- test_eval_baseline_final %>% 
+  left_join(dplyr::select(test_eval_df_h2o, WARD_NAME, MAE), by="WARD_NAME") %>% 
+  left_join(dplyr::select(test_eval_df_arima, WARD_NAME, MAE), by="WARD_NAME", suffix = c("_autoML", "_ARIMAX"))
+```
+
+```{r}
+test_eval_comb_long <- test_eval_comb %>% 
+  pivot_longer(starts_with("MAE_"), names_prefix = "MAE_", names_to = "method", values_to = "MAE")
+```
+
+```{r}
+ggplotly(
+  ggplot(test_eval_comb_long, aes(x = MAE, fill = method)) +
+    geom_density(alpha = .4)
+)
+```
+
+Now, let's see prediction for few regions
+```{r}
+test_pred_comb <- test_pred_df_arima %>% 
+  left_join(dplyr::select(test_pred_df_h2o, WARD_NAME, date, hour_of_day, ride_count_pred), by=c("WARD_NAME", "date", "hour_of_day"), suffix = c("_ARIMAX", "_autoML")) %>% 
+  left_join(dplyr::select(test_pred_df_baseline, WARD_NAME, date, hour_of_day, ride_count_pred_baseline=ride_count_week_lag), by=c("WARD_NAME", "date", "hour_of_day"))
+```
+
+```{r}
+test_pred_comb_long <- test_pred_comb %>% 
+  pivot_longer(starts_with("ride_count_"), names_prefix = "ride_count_", names_to = "method", values_to = "ride_count")
+```
+
+```{r}
+ward_names_to_plot <- c("Bellanduru", "Shantala Nagar", "cluster_1", "Begur", "Aramane Nagara", "K R Puram", "Kaveripura")
+
+plot_list = list()
+for (i in 1:length(ward_names_to_plot)) {
+  region = ward_names_to_plot[i]
+  
+  data_to_plot = dplyr::filter(test_pred_comb_long, WARD_NAME == region) %>% 
+  mutate(date_time = ymd_hms(paste(date, " ", hour_of_day, ":00:00")))
+  
+  set.seed(123)
+  plot_list[[i]] = ggplotly(
+    ggplot(data_to_plot, aes(x = date_time, y = ride_count, group = method, color = method)) + 
+      geom_line() +
+      ggtitle(paste0("Region: ", region))
+  )
+}
+```
+
+```{r}
+plot_list[[1]]
+```
+
+Here, baseline and autoML perfrom almost similary, ARIMAX is smoother than required,a nd under-predcits.
+
+```{r}
+plot_list[[3]]
+```
+
+Baseline is better at predicting peaks, but that can be totally by chance!
+
+```{r}
+plot_list[[7]]
+```
+
+Here, both baseline and autoML are over-predicting. ARIMAX is under-predicting, but to a lesser extent than the over-prediction of other models.
+
+<section id="future_improvements"></section>
+# Future Improvements
+## Check assumptions and discuss thought process with the business
+I have attempted the entire problem, without talking with the business and making my own assumptions. I have tried to expicitly state the assumptions, but one can never be sure of the self biases. So, the first thing that I would like to do, is talk with the business (by which I mean anyone who has real stake in getting this problem solved), and check my assumptions and discuss my thought process with them to get new ideas, for e.g.
+
+- I have assumed the use case itself i.e. pro-active supply allocation. The whole thing is useless if the use case is different. 
+- I have used Municipal boundaries to group lat-longs. Having lived in Bangalore, this seems sensible, but as this is for pro-active supply allocation, so only the perception of riders about regions matter, and that may not match Municipality's definitions.
+- I would like to discuss factors which the riders think impact the demand
+
+
+## Build an evaluation metric that captures the business goal
+This immediate next thing I would want to do after talking to business, is to try and define and evaluation metric that captures what the business wants. This can be one of the standard ones like MAPE, but can be custom, like giving more weightage growing regions compared to saturated regions.
+
+## Try Round-trip vs one-way-trip hypothesis
+As we have seen in the data, the no. of drop location are relatively very less compared to no. of pick locations. Now rides can be of two types
+
+- ones which have an associated return trip. Let's call such pairs as a *round-trip*
+- ones which don't have an associated reurn trip. Lets call them one-way rides
+
+For round trips, no. of pick and drop locations will always be same (duh!). But, that's not necessary for one-way rides, in fact that's highely unlikely. So, low drop/pick location ratio should be because of one-way rides. 
+
+But, notice, one ways just lead to imbalance between pick and drop locations, it does not say which one should be more. For that to happen, pick locations of one ways rides should be more than drop locations, i.e. people are coming from multiple location to few limited locations via rapido, and then either not going back (which can't be the case), or are coming back via other commute mediums. 
+
+Let's try to reason would could be the underlying reasons, leading to the above behaviour. To start, let's try to list probable reasons for which customers may be taking round vs one-ways 
+
+- Round trip
+  - Office: daily
+  - Gym, mess, etc.: almost daily
+  - Friends' or relatives': ad-hoc or some frequency
+  - Nearest mall, cafe, restaurant: some frequency
+  - party, events, etc.: ad-hoc or some frequency
+- one way
+  - to party, and coming by cab because of safety, or being drunk, or being with someone, etc.
+  - high traffic one way
+  - rain one way
+  - Rapido not available one way
+  
+As we can see, round trips are for different reasons than one way rides, and thus may have different patterns. So, it makes sense to model them separately. To do that, we would have to consider routes, instead of just pick regions.
+
+In a round trip, a drop region of the forward ride is a pick region of the return ride So, we need not predict both, we can predict for pick region of either ride (forward or return), and the same prediction would be valid for pick region of the associated ride. This is just for round trips. For one way rides, we can just predict at pick region level. Then, we would have to combine the two predictions, to have total predicctions at pick region level.
+
+Too many words, let's take a visual example to understand this better:
+
+![Summary of trips between *regions*, during some duration in a day](diagrams/Round_oneWay.svg)
+
+We will follow the below steps to predict trips:
+
+- First, we will model for round trip forward routes, i.e. AC, AE, BC, CE, and get predictions for them
+- For return trips, CA, EA, CB, and EC, predictions will be same as their respective forward trips, for e.g. prediction_return(CA) <- preduction_forward(AC)
+- Then we will model for one way rides, and predict at pick region level, i.e. we will have prediction for region B, C, D 
+- We will add predictions from both models, at pick region level
+  - prediction(A) <- prediction_forward(AC) + prediction_forward(AE)
+  - prediction(B) <- prediction_forward(BC) + prediction_oneWay(B)
+  - prediction(C) <- prediction_forward(CE) + prediction_return(CA) + prediction_return(CB) + prediction_oneWay(C)
+  - prediction(D) <- prediction_oneway(D)
+  - prediction(E) <- prediction_return(EA) + prediction_return(EC)
+
+Now, the question is how to differentiate round trips from one way trips?
+
+Let's define round trip as a set of two rides of a customer, within some time period less than 24 hours, such that pick and drop of the ride before in time are drop and pick respectively of the later ride.
+
+This will ignore cases like "going to a friends' place, staying there over weekend, and then returning", but let's ignore them for now. So, this seems doable, we will handle this in detail
+
+Also, let's also highlight that here we are not differentiating between different types of round trips, which may differ in their frequency and time of the day when they happen. Ideally, we should, because they would have different patterns. But, for now I want to focus on daily round trip for office purpose, assuming that will be the majority of round trips. We will check this assumption during data prep.
+
+This is the summary of this approach
+
+***
+- Final predictions will be at pick_region-period level
+- First, we will identify round trips and one ways
+- Then, we will cluster lat-long into homogenous regions. We have not yet defined what homogeniety means.
+- Then, we will identify homogenous periods in a day
+- Then we will model for round and one-way trips separately
+  - For round trips, we will model and predict at forward_route-period level, and return routes prediction will be equal to their respective forward route predictions
+  - For one-way trips, we will model and predict at pick_region-period level
+  - Then we will combine the results to get predictons at pick_region-period level
+  
+Note: I tried this approach, but identifying round trips was taking a lot of time (because it has to be done at customer level, so left it. In fact, trying this took a lot of my time)
+
+## Try different ways of grouping lat-longs
+
+Currently I have grouped lat-longs based on pre-defined boundaries by Bangalore's municipality. But, there are other ways to do it too, which ,ay result in better results:
+
+- Distance based clustering: like using radial distances on Earth's surfaces
+- Density based clustering: based on ride count
+- Using a Hierarchical grid system: like Uber's [H3](https://eng.uber.com/h3/))
+- Using other geo-route specific models: like [this](https://cran.r-project.org/web/packages/SpatialEpi/SpatialEpi.pdf)
+
+
+## Use entire data
+
+I decided to just use the data from start of 2019 because of huge change in patters from 2018-2019, a nd also because of less time. But on second thoughts, this was not necessarily are good move. An algorithm which can adjust for trend, and is comparatively robust (like Prophet) can gain from that data. Also, I could have tried some transformations like 'log' and then used the data
+
+## Explicitly handle outliers
+
+Though many algorithms are good at handling outliers, but its always better to clip them if we can. I didn't try this, again because of lack of time, but this is something which can be done to improve on any model.
+
+## Make better features
+
+This is always an area of improvement. It can be broken down into two categories:
+
+- Make better features from available data
+  - e.g. past population to ride ratios (this can be a proxy for supply)
+  - manually curated time-series features instead of STR decomposition
+
+- Use external data for features
+  - e.g. weather (beacuse people don't take bike taxi in rains)
+  - e.g. supply data
+
+## Try other models, and tune them better
+There are many options here, like hierarchical modelsc(both ts and no-ts), or regression variants (non-linear, splines, regularuzed, etc.), etc.
+
+There is also [Prophet](https://facebook.github.io/prophet/), which uses Bayesian modeling to fit several linear and non linear functions of time as components, and generally performs good out-of-the-box. I tried this, but the results on few regions were not that good, so I ddidn't try on all regions, because of time limitations.
+
+Also, even before going into new models, it would be interesting to visualize predictions from current models, and identifying what they are doing right, and what not. These laernings then can be used to decide on whihc model to try next.
+
+## Build a causal model
+
+Forecast models work in long term, only if they have captured some part of the true causal process. Without that, we are just on short term luck. Our predictions may seem good, but if anything unusual happens, then our models can go completely haywire. What betters times to highlight this than the current unusual situtaion because of Corono virus scare. 
+
+I am not syaing that a making a model without basing it on causal assumptions, our model will always perform bad in unseen situations. Just that without explicitly highlighting causal assumptions, and building a model on them, we have no way to ccomment on how our model will perform on unusual data.
+
+I am also not syaing that causal models ensure robustness even in unseen situations, just that being aware of causal assumptions we are better equipped to make a more robust model or change it as required by the situation.
+
+
+
