@@ -29,7 +29,7 @@ options("scipen"=100, "digits"=4, "knitr.table.format"="pandoc")
 ```
 
 ```{r global_options, include=FALSE}
-knitr::opts_chunk$set(echo=FALSE, warning=FALSE, message=TRUE, error=FALSE, cache=TRUE, cache.lazy = FALSE, tidy=TRUE, highlight=TRUE, collapse=TRUE, fig.fullwidth=TRUE, fig.align="center", fig.width=10)
+knitr::opts_chunk$set(echo=FALSE, warning=FALSE, message=TRUE, error=FALSE, cache=FALSE, cache.lazy = FALSE, tidy=TRUE, highlight=TRUE, collapse=TRUE, fig.fullwidth=TRUE, fig.align="center", fig.width=10)
 ```
 
 # Introductory Note
@@ -789,7 +789,7 @@ ggplotly(
 
 Not that clear from this, let's see the summary
 ```{r}
-temp = as.data.frame(t(sapply(dplyr::select(test_eval_df_baseline, starts_with("MAE_")), summary)))
+temp = as.data.frame(t(sapply(dplyr::select(test_eval_df_baseline, starts_with("MAE_")), function(x) round(summary(x), 2))))
 
 datatable(temp, rownames = TRUE, filter="none", options = list(scrollX=T, pageLength = 5, scrollCollapse=FALSE, paging=FALSE))
 ```
@@ -819,7 +819,7 @@ test_eval_df_h2o <- get_eval_metric_by_region_for_nonBaseline(test_pred_df_h2o, 
 ```
 
 ```{r}
-temp = as.data.frame(t(sapply(dplyr::select(test_eval_df_h2o, -WARD_NAME, -MAE_weeklyNaive), summary)))
+temp = as.data.frame(t(sapply(dplyr::select(test_eval_df_h2o, -WARD_NAME, -MAE_weeklyNaive), function(x) round(summary(x), 2))))
 
 datatable(temp, rownames = TRUE, filter="none", options = list(scrollX=T, pageLength = 5, scrollCollapse=FALSE, paging=FALSE))
 ```
@@ -837,7 +837,7 @@ test_eval_df_arima <- get_eval_metric_by_region_for_nonBaseline(test_pred_df_ari
 ```
 
 ```{r}
-temp = as.data.frame(t(sapply(dplyr::select(test_eval_df_arima, -WARD_NAME, -MAE_weeklyNaive), summary)))
+temp = as.data.frame(t(sapply(dplyr::select(test_eval_df_arima, -WARD_NAME, -MAE_weeklyNaive), function(x) round(summary(x), 2))))
 
 datatable(temp, rownames = TRUE, filter="none", options = list(scrollX=T, pageLength = 5, scrollCollapse=FALSE, paging=FALSE))
 ```
